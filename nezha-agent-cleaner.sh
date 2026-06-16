@@ -31,86 +31,53 @@ ATTACK_IP="207.58.173.192"
 BAD_KEY="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMMDxNliLAR1lLp5koxMHQtdCN0cNrV9HQbtzaDfNu8J gary@gary"
 
 # ============================================================
-# 1. 检测双 Agent 服务 (哪吒伪装 systemlog.service)
+# 1. 检测哪吒 Agent 服务 (多实例 = 被入侵)
 # ============================================================
-section "1. 检测伪装服务 (systemlog.service)"
+section "1. 检测哪吒 Agent 服务"
 
-found_svc=0
+found_agent=0
 
-# 检查是否存在伪装的 systemlog.service (与真正的 rsyslog 不同)
-if [[ -f /etc/systemd/system/systemlog.service ]]; then
-    log "${RED}[!] 发现伪装的 systemlog.service 文件${NC}"
-    log "${RED}    内容:${NC}"
-    cat /etc/systemd/system/systemlog.service | tee -a "$LOG_FILE"
-    found_svc=1
-    if [[ "$CLEANUP" == true ]]; then
-        log "${YELLOW}[*] 停止并禁用 systemlog.service...${NC}"
-        systemctl stop systemlog.service 2>/dev/null || true
-        systemctl disable systemlog.service 2>/dev/null || true
-        rm -f /etc/systemd/system/systemlog.service
-        systemctl daemon-reload 2>/dev/null || true
-        log "${GREEN}[✓] systemlog.service 已清除${NC}"
-    fi
-fi
-
-# 检查 systemctl 中是否有伪装服务
-while IFS= read -r line; do
-    if echo "$line" | grep -qiE "systemlog\.service"; then
-        # 排除真正的 syslog (rsyslog)
-        if ! echo "$line" | grep -q "rsyslog"; then
-            log "${RED}[!] 发现可疑服务: $line${NC}"
-            found_svc=1
-            if [[ "$CLEANUP" == true ]]; then
-                svc_name=$(echo "$line" | awk '{print $1}' | sed 's/\.service//')
-                systemctl stop "$svc_name" 2>/dev/null || true
-                systemctl disable "$svc_name" 2>/dev/null || true
-                rm -f "/etc/systemd/system/${svc_name}.service"
-                log "${GREEN}[✓] 已清除 $svc_name${NC}"
-            fi
-        fi
-    fi
-done < <(systemctl list-unit-files --type=service 2>/dev/null | grep -i "syslog\|systemlog" || true)
-
-# 检查是否有伪装 agent 服务 (排除已知合法服务)
-LEGIT_AGENTS="1panel-agent|unified-monitoring-agent|oracle-cloud-agent|cloud-init|snapd"
-suspicious_agents=$(systemctl list-units --type=service --state=running 2>/dev/null | grep -iE "agent|nezha|nazhe" | grep -v grep | grep -viE "$LEGIT_AGENTS" || true)
-if [[ -n "$suspicious_agents" ]]; then
-    log "${RED}[!] 检测到可疑 agent 服务:${NC}"
-    echo "$suspicious_agents" | while read -r line; do
+# 方法1: 检查所有已注册的 nezha/nazhe 服务 (包括停止的)
+nezha_services=$(systemctl list-unit-files --type=service 2>/dev/null | grep -iE "nezha|nazhe" || true)
+if [[ -n "$nezha_services" ]]; then
+    log "${RED}[!] 发现哪吒相关服务:${NC}"
+    echo "$nezha_services" | while IFS= read -r line; do
         log "${RED}    $line${NC}"
     done
-    found_svc=1
-fi
-
-if [[ $found_svc -eq 0 ]]; then
-    log "${GREEN}[✓] 未发现伪装服务${NC}"
-fi
-
-# ============================================================
-# 2. 检测 /opt/nezha 安装目录
-# ============================================================
-section "2. 检测哪吒 Agent 安装目录"
-
-found_nezha=0
-
-# 检查 /opt/nezha
-if [[ -d /opt/nezha ]]; then
-    log "${RED}[!] 发现 /opt/nezha 目录:${NC}"
-    ls -la /opt/nezha/ | tee -a "$LOG_FILE"
-    found_nezha=1
+    found_agent=1
     if [[ "$CLEANUP" == true ]]; then
-        log "${YELLOW}[*] 删除 /opt/nezha...${NC}"
-        rm -rf /opt/nezha
-        log "${GREEN}[✓] /opt/nezha 已删除${NC}"
+        log "${YELLOW}[*] 清理所有哪吒服务...${NC}"
+        echo "$nezha_services" | awk '{print $1}' | while IFS= read -r svc; do
+            systemctl stop "$svc" 2>/dev/null || true
+            systemctl disable "$svc" 2>/dev/null || true
+            rm -f "/etc/systemd/system/$svc" "/usr/lib/systemd/system/$svc"
+            log "${GREEN}[✓] 已清除 $svc${NC}"
+        done
+        systemctl daemon-reload 2>/dev/null || true
     fi
 fi
 
-# 检查其他可能的安装位置
-for d in /opt/nazhe /var/lib/nezha /var/lib/nazhe /opt/nezha-agent /opt/agent; do
+# 方法2: 检查正在运行的 nezha 进程
+nezha_procs=$(ps aux 2>/dev/null | grep -iE "nezha|nazhe" | grep -v grep | grep -v "nezha-backdoor-cleanup" || true)
+if [[ -n "$nezha_procs" ]]; then
+    log "${RED}[!] 发现哪吒相关进程:${NC}"
+    echo "$nezha_procs" | while IFS= read -r line; do
+        log "${RED}    $line${NC}"
+    done
+    found_agent=1
+    if [[ "$CLEANUP" == true ]]; then
+        pkill -f "nezha" 2>/dev/null || true
+        pkill -f "nazhe" 2>/dev/null || true
+        log "${YELLOW}[*] 已终止哪吒进程${NC}"
+    fi
+fi
+
+# 方法3: 检查 /opt/nezha 安装目录
+for d in /opt/nezha /opt/nazhe /var/lib/nezha /var/lib/nazhe; do
     if [[ -d "$d" ]]; then
-        log "${RED}[!] 发现可疑目录: $d${NC}"
-        ls -la "$d/" | tee -a "$LOG_FILE"
-        found_nezha=1
+        log "${RED}[!] 发现哪吒安装目录: $d${NC}"
+        ls -la "$d/" | head -10 | tee -a "$LOG_FILE"
+        found_agent=1
         if [[ "$CLEANUP" == true ]]; then
             rm -rf "$d"
             log "${GREEN}[✓] 已删除 $d${NC}"
@@ -118,20 +85,63 @@ for d in /opt/nazhe /var/lib/nezha /var/lib/nazhe /opt/nezha-agent /opt/agent; d
     fi
 done
 
-# 检查到攻击IP的连接
+# 方法4: 检查到攻击IP的连接
 while IFS= read -r line; do
     log "${RED}[!] 到攻击IP的连接: $line${NC}"
-    found_nezha=1
+    found_agent=1
 done < <(ss -tnp 2>/dev/null | grep "$ATTACK_IP" || true)
 
-# 检查哪吒进程
-while IFS= read -r line; do
-    log "${RED}[!] 哪吒进程: $line${NC}"
-    found_nezha=1
-done < <(ps aux 2>/dev/null | grep -iE "nazhe|nezha|agent.*$ATTACK_IP" | grep -v grep | grep -v "nezha-backdoor-cleanup" || true)
+if [[ $found_agent -eq 0 ]]; then
+    log "${GREEN}[✓] 未发现哪吒 Agent${NC}"
+fi
 
-if [[ $found_nezha -eq 0 ]]; then
-    log "${GREEN}[✓] 未发现哪吒 Agent 安装或连接${NC}"
+# ============================================================
+# 2. 检测伪装 systemlog.service (负责复活的守护服务)
+# ============================================================
+section "2. 检测伪装 systemlog.service"
+
+found_fake=0
+
+# 检查 /etc/systemd/system/ 下的 systemlog.service (非 rsyslog)
+if [[ -f /etc/systemd/system/systemlog.service ]]; then
+    # 验证是否是伪装的 (真正的 syslog 是 rsyslog 的符号链接)
+    if [[ ! -L /etc/systemd/system/systemlog.service ]]; then
+        log "${RED}[!] 发现伪装的 systemlog.service 文件${NC}"
+        log "${RED}    内容:${NC}"
+        cat /etc/systemd/system/systemlog.service | tee -a "$LOG_FILE"
+        found_fake=1
+        if [[ "$CLEANUP" == true ]]; then
+            log "${YELLOW}[*] 清除伪装 systemlog.service...${NC}"
+            systemctl stop systemlog.service 2>/dev/null || true
+            systemctl disable systemlog.service 2>/dev/null || true
+            rm -f /etc/systemd/system/systemlog.service
+            systemctl daemon-reload 2>/dev/null || true
+            log "${GREEN}[✓] systemlog.service 已清除${NC}"
+        fi
+    fi
+fi
+
+# 检查 systemctl 中注册的 systemlog 服务 (排除真正的 rsyslog)
+while IFS= read -r line; do
+    svc_name=$(echo "$line" | awk '{print $1}')
+    # 排除 rsyslog 和 syslog.socket
+    if echo "$svc_name" | grep -qiE "rsyslog|syslog\.socket"; then
+        continue
+    fi
+    if echo "$line" | grep -qiE "systemlog"; then
+        log "${RED}[!] 发现可疑服务: $line${NC}"
+        found_fake=1
+        if [[ "$CLEANUP" == true ]]; then
+            systemctl stop "$svc_name" 2>/dev/null || true
+            systemctl disable "$svc_name" 2>/dev/null || true
+            rm -f "/etc/systemd/system/$svc_name" "/usr/lib/systemd/system/$svc_name"
+            log "${GREEN}[✓] 已清除 $svc_name${NC}"
+        fi
+    fi
+done < <(systemctl list-unit-files --type=service 2>/dev/null | grep -i "systemlog" || true)
+
+if [[ $found_fake -eq 0 ]]; then
+    log "${GREEN}[✓] 未发现伪装 systemlog.service${NC}"
 fi
 
 # ============================================================
@@ -180,7 +190,7 @@ while IFS= read -r pid; do
     cmdline=$(cat /proc/$pid/cmdline 2>/dev/null | tr '\0' ' ' || true)
     if [[ "$exe" == *"(deleted)"* ]]; then
         # 排除已知正常系统进程
-        if ! echo "$name $cmdline" | grep -qiE "agetty|systemd-logind|systemd-resolve|python3|sshd|unattended|sd-pam|cloud-init|rsyslog"; then
+        if ! echo "$name $cmdline" | grep -qiE "agetty|systemd-logind|systemd-resolve|python3|sshd|unattended|sd-pam|cloud-init|rsyslog|sftp-server|ssh-keysign"; then
             log "${RED}[!] 可疑 deleted 进程: PID=$pid exe=$exe name=$name cmd=$cmdline${NC}"
             found_memfd=1
             if [[ "$CLEANUP" == true ]]; then
