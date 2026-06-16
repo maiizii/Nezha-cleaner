@@ -239,6 +239,9 @@ scan_nezha_backdoor() {
             log "${RED}[!!!] 发现: $p${NC}"
             found=1
             COUNT_SUSPICIOUS=$((COUNT_SUSPICIOUS + 1))
+            local q_p
+            q_p=$(shell_quote "$p")
+            add_cleanup_action 1 "删除残留路径 $p" "backup_dir $q_p 2>/dev/null || backup_file $q_p 2>/dev/null || true; rm -rf $q_p"
         fi
     done
     if [[ -d /opt/nezha/agent ]]; then
@@ -251,6 +254,9 @@ scan_nezha_backdoor() {
                 log "${RED}[!!!] 发现: $f${NC}"
                 found=1
                 COUNT_SUSPICIOUS=$((COUNT_SUSPICIOUS + 1))
+                local q_f
+                q_f=$(shell_quote "$f")
+                add_cleanup_action 1 "删除临时残留 $f" "backup_dir $q_f 2>/dev/null || backup_file $q_f 2>/dev/null || true; rm -rf $q_f"
             fi
         done
     done
@@ -518,6 +524,9 @@ scan_systemloger_persistence() {
                 log_raw "$content"
                 found=1
                 COUNT_SUSPICIOUS=$((COUNT_SUSPICIOUS + 1))
+                local q_cron
+                q_cron=$(shell_quote "$cron_file")
+                add_cleanup_action 1 "删除可疑 cron $cron_file" "backup_file $q_cron; sed -i '/207\\.58\\.173\\.192\\|nezha\\|nazhe\\|memfd\\|\\/dev\\/shm\\|bash -c\\|\\/dev\\/tcp\\|SystemLoger\\|systemloger\\|\\/usr\\/freemem\\.sh/d' $q_cron"
             fi
         done < <(find "$cdir" -maxdepth 1 -type f 2>/dev/null || true)
     done
@@ -527,6 +536,7 @@ scan_systemloger_persistence() {
             log "${RED}[!!!] 可疑 /etc/crontab${NC}"
             found=1
             COUNT_SUSPICIOUS=$((COUNT_SUSPICIOUS + 1))
+            add_cleanup_action 1 "删除 /etc/crontab 中的恶意项" "backup_file /etc/crontab; sed -i '/207\\.58\\.173\\.192\\|nezha\\|nazhe\\|memfd\\|\\/dev\\/shm\\|bash -c\\|\\/dev\\/tcp\\|SystemLoger\\|systemloger\\|\\/usr\\/freemem\\.sh/d' /etc/crontab"
         fi
     fi
 
@@ -726,6 +736,11 @@ execute_cleanup() {
     [[ "$has_l2" == false ]] && log "  (无)"
 
     # 确认
+    if [[ "$MODE_DRY_RUN" == true ]]; then
+        log "${YELLOW}dry-run 不执行清理${NC}"
+        return
+    fi
+
     if [[ "$MODE_YES" != true ]]; then
         log "\n${YELLOW}输入 YES 确认执行以上清理操作:${NC}"
         read -r answer
