@@ -1,59 +1,48 @@
-# 哪吒探针漏洞 - 后门检测与清理脚本
+# 哪吒探针漏洞后门检测与清理脚本
 
-针对哪吒监控探针 (Nezha Agent) 漏洞的后门检测与清理工具。
+用于检查和清理哪吒 Agent 被批量下发 payload 后留下的已知痕迹。
 
-## 攻击载荷
+## 覆盖范围
 
-| # | 载荷 | 说明 |
-|---|------|------|
-| 1 | 哪吒后门 Agent | 安装在 /opt/nezha，连接 C2 服务器 |
-| 2 | gary@gary SSH 后门 | 植入恶意 SSH 公钥 |
-| 3 | memfd 内存马 | 伪装 kworker 进程，驻留内存 |
-| 4 | systemlog.service | 伪装系统日志服务，负责复活 |
-| 5 | systemd-executor | 异常文件，可能为后门组件 |
+1. 恶意哪吒 Agent 和残留目录：`/opt/nezha`、`/tmp/nezha-agent`
+2. 已知 SSH 后门公钥：`gary@gary` 及两条已知 ed25519 key
+3. memfd / `/dev/shm` 内存马和伪装 `kworker` 进程
+4. `SystemLoger`、`c3pool`、`xmrig` 等持久化痕迹
+5. cron 里的复活项，例如 `/dev/shm/.kworker_u8` 和 `/usr/freemem.sh`
 
 ## 使用方法
 
-### 仅扫描 (推荐先执行)
+先只看清理计划：
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/clarencejh/Nezha-cleaner/main/nezha-agent-cleaner.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/maiizii/Nezha-cleaner/main/nezha-agent-cleaner.sh) --dry-run
 ```
 
-### 扫描 + 自动清理
+确认后执行清理：
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/clarencejh/Nezha-cleaner/main/nezha-agent-cleaner.sh) --clean
+bash <(curl -fsSL https://raw.githubusercontent.com/maiizii/Nezha-cleaner/main/nezha-agent-cleaner.sh) --clean --yes
 ```
 
-### 手动下载执行
+清理后复查：
 
 ```bash
-curl -sO https://raw.githubusercontent.com/clarencejh/Nezha-cleaner/main/nezha-agent-cleaner.sh
-chmod +x nezha-agent-cleaner.sh
-./nezha-agent-cleaner.sh          # 仅扫描
-sudo ./nezha-agent-cleaner.sh --clean  # 扫描+清理
+bash <(curl -fsSL https://raw.githubusercontent.com/maiizii/Nezha-cleaner/main/nezha-agent-cleaner.sh) --dry-run
 ```
 
-## 检测项
+复查时看到 `明确恶意 (Level 1): 0`、`高度可疑 (Level 2): 0`，并且显示 `无需清理的操作`，代表脚本覆盖的已知项已经清理完。
 
-1. 伪装 systemlog.service (与 rsyslog 区分)
-2. /opt/nezha 安装目录
-3. gary@gary SSH 后门公钥
-4. memfd 内存马 / 伪装 kworker
-5. SystemLoger 守护服务
-6. /tmp 残留恶意文件
-7. 定时任务后门
-8. SSH 安全配置审计
-9. rootkit 检查 (ld.so.preload + 内核模块)
-10. 活跃网络连接审计
+## 参数
 
-## 注意事项
+```text
+无参数      仅扫描
+--dry-run   仅显示将执行的清理动作
+--clean     扫描并清理，默认需要输入 YES
+--yes       跳过确认，配合 --clean 使用
+```
 
-- 建议先用扫描模式检查，确认后再用 `--clean` 清理
-- 清理后建议：修改所有用户密码，重新生成 SSH 密钥对
-- 日志文件保存在 `/root/nezha-scan-<hostname>-<timestamp>.log`
+## 说明
 
-## 致谢
-
-感谢社区安全研究人员提供的攻击指标 (IoCs)。
+- 脚本会先备份关键路径到 `/root/incident-backup-<timestamp>`。
+- 哪吒 Agent 会优先按官方方式卸载，再删除残留目录和 service 文件。
+- 这只能处理当前已知 IOC；被 root 控制过的机器仍建议轮换 SSH key，并按重要性排期重装。
