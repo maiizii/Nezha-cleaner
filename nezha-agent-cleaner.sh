@@ -48,6 +48,8 @@ LOG_FILE="/root/nezha-cleaner-${TIMESTAMP}.log"
 BACKUP_DIR="/root/incident-backup-${TIMESTAMP}"
 ATTACK_IP="207.58.173.192"
 BAD_KEY_COMMENT="gary@gary"
+BAD_KEY_1="AAAAC3NzaC1lZDI1NTE5AAAAIMMDxNliLAR1lLp5koxMHQtdCN0cNrV9HQbtzaDfNu8J"
+BAD_KEY_2="AAAAC3NzaC1lZDI1NTE5AAAAIPAizH+yJstRAa0oa6H4jdYy188ONIkDmdGVOpgF6+q4"
 
 # ---- 计数器 ----
 COUNT_MALICIOUS=0
@@ -90,6 +92,10 @@ backup_dir() {
 add_cleanup_action() {
     local level="$1" desc="$2" cmd="$3"
     CLEANUP_ACTIONS+=("LEVEL:${level}|DESC:${desc}|CMD:${cmd}")
+}
+
+shell_quote() {
+    printf "%q" "$1"
 }
 
 confirm_cleanup() {
@@ -168,6 +174,7 @@ scan_network_connections() {
 scan_nezha_backdoor() {
     section "哪吒 Agent 扫描"
     local found=0
+    local uninstall_cmd="if [[ -d /opt/nezha/agent ]]; then cd /opt/nezha/agent; [[ -x ./nezha-agent ]] && ./nezha-agent service uninstall >/dev/null 2>&1 || true; [[ -x ./agent.sh ]] && ./agent.sh uninstall >/dev/null 2>&1 || true; fi; systemctl list-unit-files --type=service --no-legend 2>/dev/null | awk '{print \$1}' | grep -Ei '^nezha.*\\.service$|^nazhe.*\\.service$' | while read -r svc; do systemctl stop \"\$svc\" 2>/dev/null; systemctl disable \"\$svc\" 2>/dev/null; systemctl reset-failed \"\$svc\" 2>/dev/null; done; find /etc/systemd/system /lib/systemd/system /usr/lib/systemd/system -maxdepth 1 -type f \\( -iname '*nezha*.service' -o -iname '*nazhe*.service' \\) -delete 2>/dev/null; rm -rf /opt/nezha/agent; rmdir /opt/nezha 2>/dev/null || true; systemctl daemon-reload 2>/dev/null"
 
     # 检查 systemd unit 文件
     local unit_dirs="/etc/systemd/system /lib/systemd/system /usr/lib/systemd/system"
@@ -234,6 +241,9 @@ scan_nezha_backdoor() {
             COUNT_SUSPICIOUS=$((COUNT_SUSPICIOUS + 1))
         fi
     done
+    if [[ -d /opt/nezha/agent ]]; then
+        add_cleanup_action 1 "按官方流程卸载并删除全部哪吒 Agent" "$uninstall_cmd"
+    fi
     for p in /tmp/nezha* /var/tmp/nezha* /dev/shm/nezha*; do
         # shellcheck disable=SC2086
         for f in $p; do
@@ -285,11 +295,21 @@ scan_ssh_backdoor_keys() {
             [[ -z "$line" ]] && continue
             [[ "$line" == \#* ]] && continue
 
-            local key_type key_comment fingerprint match_gary
+            local key_type key_comment fingerprint match_bad_key bad_reason
             key_type=$(echo "$line" | awk '{print $1}')
             key_comment=$(echo "$line" | awk '{print $NF}')
-            match_gary=false
-            [[ "$line" == *"$BAD_KEY_COMMENT"* ]] && match_gary=true
+            match_bad_key=false
+            bad_reason=""
+            if [[ "$line" == *"$BAD_KEY_COMMENT"* ]]; then
+                match_bad_key=true
+                bad_reason="$BAD_KEY_COMMENT"
+            elif [[ "$line" == *"$BAD_KEY_1"* ]]; then
+                match_bad_key=true
+                bad_reason="$BAD_KEY_1"
+            elif [[ "$line" == *"$BAD_KEY_2"* ]]; then
+                match_bad_key=true
+                bad_reason="$BAD_KEY_2"
+            fi
 
             # 尝试获取 fingerprint
             fingerprint=""
@@ -298,13 +318,15 @@ scan_ssh_backdoor_keys() {
             fi
 
             local status="normal"
-            if [[ "$match_gary" == true ]]; then
+            if [[ "$match_bad_key" == true ]]; then
                 status="MALICIOUS"
-                warn "$akf:$line_num $key_type $key_comment (匹配 $BAD_KEY_COMMENT) fp=$fingerprint"
+                warn "$akf:$line_num $key_type $key_comment (匹配 $bad_reason) fp=$fingerprint"
                 COUNT_MALICIOUS=$((COUNT_MALICIOUS + 1))
                 found=1
-                add_cleanup_action 1 "删除 $akf:$line_num gary@gary 公钥" \
-                    "sed -i '${line_num}d' '$akf'"
+                local q_akf
+                q_akf=$(shell_quote "$akf")
+                add_cleanup_action 1 "删除 $akf 中的已知后门公钥" \
+                    "tmp=\$(mktemp) && awk -v c='$BAD_KEY_COMMENT' -v k1='$BAD_KEY_1' -v k2='$BAD_KEY_2' 'index(\$0,c)==0 && index(\$0,k1)==0 && index(\$0,k2)==0' $q_akf > \"\$tmp\" && cat \"\$tmp\" > $q_akf && rm -f \"\$tmp\" && chmod 600 $q_akf"
             else
                 # 输出所有 key 供审计
                 log "${YELLOW}[audit] $akf:$line_num $key_type $key_comment fp=$fingerprint${NC}"
@@ -312,7 +334,7 @@ scan_ssh_backdoor_keys() {
         done < "$akf"
     done
 
-    [[ $found -eq 0 ]] && info "未发现 gary@gary 后门公钥 (已列出所有 key 供审计)"
+    [[ $found -eq 0 ]] && info "未发现已知后门公钥 (已列出所有 key 供审计)"
 }
 
 # ============================================================
@@ -334,7 +356,9 @@ scan_memfd_malware() {
         ppid=$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null || true)
         user=$(awk '/^Uid:/{print $2}' "/proc/$pid/status" 2>/dev/null || true)
 
-        [[ -z "$exe" ]] && continue
+        if echo "$cmdline $exe" | grep -qi "nezha-agent-cleaner"; then
+            continue
+        fi
 
         local hit_reason=""
         local severity="suspicious"
@@ -358,17 +382,21 @@ scan_memfd_malware() {
                 severity="suspicious"
             fi
         # 规则 5: 伪装 kworker (PPID != 2)
-        elif echo "$comm" | grep -q "kworker"; then
-            if [[ "$ppid" != "2" ]] && [[ -n "$cmdline" ]]; then
-                hit_reason="伪装 kworker: PPID=$ppid (期望2), 有cmdline"
+        elif echo "$comm $cmdline" | grep -qE '(^|[[:space:]])\[?kworker/[0-9]+:[0-9]'; then
+            if [[ "$ppid" != "2" ]] || [[ -n "$cmdline" ]] || [[ -n "$exe" ]]; then
+                hit_reason="伪装 kworker: PPID=$ppid (期望2), cmdline/exe 异常"
                 severity="malicious"
             elif [[ -n "$cmdline" ]]; then
                 hit_reason="kworker 有 cmdline (可疑)"
                 severity="suspicious"
             fi
+        # 规则 6: 已知挖矿/守护/哪吒恶意进程名
+        elif echo "$comm $cmdline $exe" | grep -qiE "c3pool|xmrig|SystemLoger|systemloger|/opt/systemlog|/opt/nezha/agent/nezha-agent"; then
+            hit_reason="匹配已知恶意进程特征"
+            severity="malicious"
         fi
 
-        # 规则 6: 伪装 kworker 且有外连
+        # 规则 7: 可疑进程且有外连
         if [[ -n "$hit_reason" ]] && cmd_exists ss; then
             local net
             net=$(ss -tnp 2>/dev/null | grep "pid=$pid" || true)
@@ -387,10 +415,10 @@ scan_memfd_malware() {
 
             if [[ "$severity" == "malicious" ]]; then
                 COUNT_MALICIOUS=$((COUNT_MALICIOUS + 1))
-                add_cleanup_action 1 "kill PID $pid ($comm)" "kill -TERM '$pid'; sleep 2; kill -KILL '$pid'"
+                add_cleanup_action 1 "kill PID $pid ($comm)" "kill -TERM '$pid' 2>/dev/null; sleep 2; kill -KILL '$pid' 2>/dev/null"
             else
                 COUNT_SUSPICIOUS=$((COUNT_SUSPICIOUS + 1))
-                add_cleanup_action 2 "kill PID $pid ($comm, 需确认)" "kill -TERM '$pid'; sleep 2; kill -KILL '$pid'"
+                add_cleanup_action 2 "kill PID $pid ($comm, 需确认)" "kill -TERM '$pid' 2>/dev/null; sleep 2; kill -KILL '$pid' 2>/dev/null"
             fi
         fi
     done
